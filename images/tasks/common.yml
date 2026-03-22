@@ -1,8 +1,8 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: '3'
 
-# Shared Docker container tasks.
-# Include this file from an image Taskfile using the common_tasks var:
+# Shared Docker tasks.
+# Include from an image Taskfile via the common_tasks var:
 #
 #   includes:
 #     common:
@@ -10,13 +10,11 @@ version: '3'
 #       optional: true
 
 vars:
-  registry: '{{.registry | default "ghcr.io"}}'
+  registry:    '{{.registry    | default "ghcr.io"}}'
   image_owner: '{{.image_owner | default "nick-hildebrant-etas"}}'
-  image_name: '{{.image_name | default "score-cache/nginx"}}'
-  image_tag: '{{.image_tag | default "latest"}}'
+  image_name:  '{{.image_name  | default "score-cache"}}'
+  image_tag:   '{{.image_tag   | default "latest"}}'
   result_folder: '{{.result_folder | default "../../build/"}}'
-  compose_file: '{{.compose_file | default "docker-compose.yml"}}'
-  dockerfile: '{{.dockerfile | default "Dockerfile"}}'
 
 tasks:
   build:
@@ -28,34 +26,12 @@ tasks:
         --label org.opencontainers.image.source=https://github.com/{{.image_owner}}/score-cache
         --label org.opencontainers.image.version={{.image_tag}}
         -t {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}}
-        -f {{.dockerfile}}
         .
 
   push:
     desc: Push the OCI container image to the registry
     cmds:
       - docker push {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}}
-
-  up:
-    desc: Start all services with docker compose
-    cmds:
-      - docker compose -f {{.compose_file}} up -d
-
-  down:
-    desc: Stop all services
-    cmds:
-      - docker compose -f {{.compose_file}} down
-
-  logs:
-    desc: Follow service logs
-    cmds:
-      - docker compose -f {{.compose_file}} logs --follow
-
-  clean:
-    desc: Remove built images and volumes
-    cmds:
-      - docker compose -f {{.compose_file}} down --volumes --rmi local
-      - rm -rf {{.result_folder}}
 
   login:
     desc: Log in to the container registry

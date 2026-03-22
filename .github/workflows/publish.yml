@@ -1,22 +1,19 @@
-name: Publish OCI Container
+name: Build, Test and Publish OCI Container
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - 'v*'
+    branches: [main]
+    tags:     ['v*']
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 env:
-  REGISTRY: ghcr.io
+  REGISTRY:    ghcr.io
   IMAGE_OWNER: ${{ github.repository_owner }}
 
 jobs:
-  publish:
-    name: Build and publish OCI container to GHCR
+  build-test:
+    name: Build and test score-cache container
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -33,15 +30,28 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to GHCR
+        # Login on every event so that test pulls from the registry also work.
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push OCI container
+      - name: Build and test score-cache container
         env:
-          REGISTRY: ${{ env.REGISTRY }}
+          REGISTRY:    ${{ env.REGISTRY }}
           IMAGE_OWNER: ${{ env.IMAGE_OWNER }}
-          IMAGE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || (github.ref_name == 'main' && 'latest' || github.sha) }}
-        run: task score-cache:build score-cache:push
+          IMAGE_TAG:   ${{ github.sha }}
+        run: task score-cache:test
+
+      - name: Push to GHCR
+        # Only push on merge to main or a version tag — not on PR builds.
+        if: >
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          REGISTRY:    ${{ env.REGISTRY }}
+          IMAGE_OWNER: ${{ env.IMAGE_OWNER }}
+          IMAGE_TAG: >-
+            ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+        run: task score-cache:push

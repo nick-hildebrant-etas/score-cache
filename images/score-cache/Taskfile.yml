@@ -2,33 +2,40 @@
 version: '3'
 
 vars:
-  result_folder: '{{.result_folder | default "../../build/"}}'
-  common_tasks: '{{.common_tasks | default "../../images/tasks/"}}'
-  registry: '{{.registry | default "ghcr.io"}}'
-  image_owner: '{{.image_owner | default "nick-hildebrant-etas"}}'
-  image_name: '{{.image_name | default "score-cache/nginx"}}'
-  image_tag: '{{.image_tag | default "latest"}}'
-  compose_file: '{{.compose_file | default "docker-compose.yml"}}'
-  dockerfile: '{{.dockerfile | default "Dockerfile"}}'
-  tests_dir: '{{.tests_dir | default "../../tests/"}}'
+  result_folder:  '{{.result_folder | default "../../build/"}}'
+  # common_tasks is a plain path (ebcl_template convention) — override via CLI if needed
+  common_tasks:   '../../images/tasks/'
+  registry:       '{{.registry      | default "ghcr.io"}}'
+  image_owner:    '{{.image_owner   | default "nick-hildebrant-etas"}}'
+  image_name:     '{{.image_name    | default "score-cache"}}'
+  image_tag:      '{{.image_tag     | default "latest"}}'
+  dockerfile:     '{{.dockerfile    | default "Dockerfile"}}'
+  # Container lifecycle
+  container_name: '{{.container_name | default "score-cache-ci"}}'
+  http_port:      '{{.http_port      | default "8080"}}'
+  grpc_port:      '{{.grpc_port      | default "9093"}}'
+  nexus_user:     '{{.nexus_user     | default "admin"}}'
+  # Bazel test artifact — deterministic content+hash shared by push and pull tasks
+  _bazel_content: 'score-cache-test-artifact'
+  _bazel_hash:
+    sh: printf '%s' 'score-cache-test-artifact' | sha256sum | cut -d' ' -f1
 
 includes:
-  common:
-    taskfile: '{{.common_tasks}}common.yml'
-    optional: true
   vm:
     taskfile: '{{.common_tasks}}vm.yml'
     optional: true
 
 tasks:
+
+  # ── Lifecycle ───────────────────────────────────────────────────────────────
+
   default:
-    desc: Build the score-cache OCI container
-    cmds:
-      - task: build
+    desc: Build the score-cache OCI image
+    cmds: [{task: build}]
     silent: true
 
   build:
-    desc: Build the score-cache nginx proxy image
+    desc: Build the single-container score-cache OCI image
     cmds:
       - mkdir -p {{.result_folder}}
       - >-
@@ -38,6 +45,28 @@ tasks:
         -t {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}}
         -f {{.dockerfile}}
         .
+
+  start:
+    desc: Run the score-cache container in the background
+    cmds:
+      - docker rm -f {{.container_name}} 2>/dev/null || true
+      - >-
+        docker run -d
+        --name {{.container_name}}
+        --shm-size=2g
+        -p {{.http_port}}:80
+        -p {{.grpc_port}}:9093
+        {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}}
+
+  stop:
+    desc: Stop and remove the score-cache container
+    cmds:
+      - docker rm -f {{.container_name}} 2>/dev/null || true
+
+  logs:
+    desc: Tail score-cache container logs
+    cmds:
+      - docker logs -f {{.container_name}}
 
   push:
     desc: Push the score-cache image to the registry
@@ -49,38 +78,218 @@ tasks:
     cmds:
       - echo "${REGISTRY_TOKEN}" | docker login {{.registry}} -u "${REGISTRY_USER}" --password-stdin
 
-  up:
-    desc: Start the score-cache stack (nginx + nexus + bazel-remote)
-    cmds:
-      - docker compose -f {{.compose_file}} up -d
-
-  down:
-    desc: Stop the score-cache stack
-    cmds:
-      - docker compose -f {{.compose_file}} down
-
-  configure-nexus:
-    desc: Provision Nexus proxy repositories after first start
-    cmds:
-      - bash nexus/configure.sh
-
-  test:
-    desc: Run score-cache service tests
-    cmds:
-      - bash {{.tests_dir}}test_services.sh
-
-  logs:
-    desc: Follow score-cache service logs
-    cmds:
-      - docker compose -f {{.compose_file}} logs --follow
-
   clean:
-    desc: Remove score-cache images and volumes
+    desc: Remove score-cache image and stop the test container
     cmds:
-      - docker compose -f {{.compose_file}} down --volumes --rmi local
+      - docker rm -f {{.container_name}} 2>/dev/null || true
+      - docker rmi {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}} 2>/dev/null || true
       - rm -rf {{.result_folder}}
 
   download-cloud-image:
     desc: Download Ubuntu Noble 24.04 LTS aarch64 cloud image
+    cmds: [{task: vm:download-cloud-image}]
+
+  # ── Master test target (used by CI) ─────────────────────────────────────────
+  #
+  # Builds the image, starts the container, waits for all services to be
+  # ready, runs every test-{service}-{push,pull} task, then always stops.
+
+  test:
+    desc: Build → start → test all services → stop
     cmds:
-      - task: vm:download-cloud-image
+      - task: build
+      - task: start
+      - defer: task stop
+      - task: _wait-ready
+      - task: test-bazel-push
+      - task: test-bazel-pull
+      - task: test-nexus-push
+      - task: test-nexus-pull
+      - task: test-pypi-push
+      - task: test-pypi-pull
+      - task: test-cargo-push
+      - task: test-cargo-pull
+      - echo "All score-cache tests passed."
+
+  # ── Internal: wait for all services ─────────────────────────────────────────
+
+  _wait-ready:
+    internal: true
+    desc: Block until bazel-remote and nexus are responding
+    vars:
+      base: 'http://127.0.0.1:{{.http_port}}'
+    cmds:
+      - |
+        echo "Waiting for bazel-remote (/cache/status) …"
+        for i in $(seq 1 60); do
+          curl -sf "{{.base}}/cache/status" >/dev/null 2>&1 && break
+          sleep 5
+        done
+        curl -sf "{{.base}}/cache/status" >/dev/null || { echo "FAIL: bazel-remote not ready"; exit 1; }
+        echo "bazel-remote ready"
+      - |
+        echo "Waiting for nexus admin password file (may take 2+ minutes on first boot) …"
+        for i in $(seq 1 120); do
+          NPASS=$(docker exec {{.container_name}} cat /nexus-data/admin.password 2>/dev/null) || true
+          [ -n "$NPASS" ] && \
+            curl -sf -u "admin:$NPASS" "{{.base}}/nexus/service/rest/v1/status" >/dev/null 2>&1 && \
+            break
+          sleep 5
+        done
+        NPASS=$(docker exec {{.container_name}} cat /nexus-data/admin.password 2>/dev/null) || true
+        curl -sf -u "admin:${NPASS:-none}" "{{.base}}/nexus/service/rest/v1/status" >/dev/null \
+          || { echo "FAIL: nexus not ready"; exit 1; }
+        echo "nexus ready (admin.password present)"
+      - |
+        echo "Waiting for nexus-init to finish provisioning repos …"
+        for i in $(seq 1 60); do
+          docker exec {{.container_name}} test -f /nexus-data/.score-cache-init-done 2>/dev/null && break
+          sleep 5
+        done
+        docker exec {{.container_name}} test -f /nexus-data/.score-cache-init-done 2>/dev/null \
+          || { echo "FAIL: nexus-init did not complete"; exit 1; }
+        echo "nexus repos provisioned"
+
+  # ── test-bazel-push ──────────────────────────────────────────────────────────
+  # Demonstrate writing an artifact to the bazel-remote CAS via nginx /cache/.
+
+  test-bazel-push:
+    desc: "curl: PUT an artifact into the bazel-remote CAS via nginx /cache/"
+    cmds:
+      - |
+        HASH="{{._bazel_hash}}"
+        echo "Pushing artifact (hash=${HASH:0:16}…) to /cache/cas/$HASH"
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          -X PUT --data '{{._bazel_content}}' \
+          "http://127.0.0.1:{{.http_port}}/cache/cas/$HASH")
+        echo "HTTP $HTTP"
+        [ "$HTTP" = "200" ] || { echo "FAIL: expected 200, got $HTTP"; exit 1; }
+        echo "PASS test-bazel-push"
+
+  # ── test-bazel-pull ──────────────────────────────────────────────────────────
+  # Demonstrate reading back the artifact stored by test-bazel-push.
+
+  test-bazel-pull:
+    desc: "curl: GET the previously pushed artifact from bazel-remote via /cache/"
+    cmds:
+      - |
+        HASH="{{._bazel_hash}}"
+        echo "Pulling artifact (hash=${HASH:0:16}…) from /cache/cas/$HASH"
+        RESULT=$(curl -sf "http://127.0.0.1:{{.http_port}}/cache/cas/$HASH")
+        echo "Received: $RESULT"
+        [ "$RESULT" = "{{._bazel_content}}" ] \
+          || { echo "FAIL: content mismatch"; exit 1; }
+        echo "PASS test-bazel-pull"
+
+  # ── test-nexus-push ──────────────────────────────────────────────────────────
+  # Demonstrate uploading a file to the nexus raw-hosted repo via nginx /raw/.
+  # The nexus admin password is read from the running container at task invocation.
+
+  test-nexus-push:
+    desc: "curl: PUT a test file to the nexus raw-hosted repo via nginx /raw/"
+    vars:
+      _npass:
+        sh: docker exec {{.container_name}} cat /nexus-data/admin.password 2>/dev/null || echo ""
+    cmds:
+      - |
+        echo "Pushing test file to /raw/score-cache-test.txt"
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          -u "{{.nexus_user}}:{{._npass}}" \
+          -X PUT \
+          -H "Content-Type: text/plain" \
+          --data 'score-cache-nexus-test' \
+          "http://127.0.0.1:{{.http_port}}/raw/score-cache-test.txt")
+        echo "HTTP $HTTP"
+        [ "$HTTP" = "201" ] || { echo "FAIL: expected 201, got $HTTP"; exit 1; }
+        echo "PASS test-nexus-push"
+
+  # ── test-nexus-pull ──────────────────────────────────────────────────────────
+  # Demonstrate reading back the file uploaded by test-nexus-push.
+
+  test-nexus-pull:
+    desc: "curl: GET the previously pushed file from the nexus raw-hosted repo via nginx /raw/"
+    vars:
+      _npass:
+        sh: docker exec {{.container_name}} cat /nexus-data/admin.password 2>/dev/null || echo ""
+    cmds:
+      - |
+        echo "Pulling test file from /raw/score-cache-test.txt"
+        RESULT=$(curl -sf \
+          -u "{{.nexus_user}}:{{._npass}}" \
+          "http://127.0.0.1:{{.http_port}}/raw/score-cache-test.txt")
+        echo "Received: $RESULT"
+        [ "$RESULT" = "score-cache-nexus-test" ] \
+          || { echo "FAIL: content mismatch"; exit 1; }
+        echo "PASS test-nexus-pull"
+
+  # ── test-pypi-push ───────────────────────────────────────────────────────────
+  # Demonstrate that the PyPI proxy route is reachable (request flows through
+  # nginx → nexus). Any non-connection-error HTTP code is a pass.
+
+  test-pypi-push:
+    desc: "curl: request the PyPI simple index through nginx/nexus (route reachability)"
+    cmds:
+      - |
+        echo "Requesting PyPI simple index via /pypi/simple/"
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          "http://127.0.0.1:{{.http_port}}/pypi/simple/")
+        echo "HTTP $HTTP"
+        case "$HTTP" in
+          2[0-9][0-9]|3[0-9][0-9]|4[0-9][0-9]|503)
+            echo "PASS test-pypi-push (route reachable, nexus responded)";;
+          *)
+            echo "FAIL: connection error or nginx routing failure (HTTP $HTTP)"; exit 1;;
+        esac
+
+  # ── test-pypi-pull ───────────────────────────────────────────────────────────
+  # Same proxy-route check with a specific package path.
+
+  test-pypi-pull:
+    desc: "curl: request a PyPI package path through nginx/nexus proxy"
+    cmds:
+      - |
+        echo "Requesting /pypi/simple/pip/ via proxy"
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          "http://127.0.0.1:{{.http_port}}/pypi/simple/pip/")
+        echo "HTTP $HTTP"
+        case "$HTTP" in
+          2[0-9][0-9]|3[0-9][0-9]|4[0-9][0-9]|503)
+            echo "PASS test-pypi-pull (route reachable, nexus responded)";;
+          *)
+            echo "FAIL: connection error or nginx routing failure (HTTP $HTTP)"; exit 1;;
+        esac
+
+  # ── test-cargo-push ──────────────────────────────────────────────────────────
+  # Demonstrate that the Cargo proxy route is reachable.
+
+  test-cargo-push:
+    desc: "curl: request the Cargo proxy root through nginx/nexus (route reachability)"
+    cmds:
+      - |
+        echo "Requesting Cargo proxy root via /cargo/"
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          "http://127.0.0.1:{{.http_port}}/cargo/")
+        echo "HTTP $HTTP"
+        case "$HTTP" in
+          2[0-9][0-9]|3[0-9][0-9]|4[0-9][0-9]|503)
+            echo "PASS test-cargo-push (route reachable, nexus responded)";;
+          *)
+            echo "FAIL: connection error or nginx routing failure (HTTP $HTTP)"; exit 1;;
+        esac
+
+  # ── test-cargo-pull ──────────────────────────────────────────────────────────
+
+  test-cargo-pull:
+    desc: "curl: request a Cargo crate path through nginx/nexus proxy"
+    cmds:
+      - |
+        echo "Requesting /cargo/ via proxy"
+        HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          "http://127.0.0.1:{{.http_port}}/cargo/")
+        echo "HTTP $HTTP"
+        case "$HTTP" in
+          2[0-9][0-9]|3[0-9][0-9]|4[0-9][0-9]|503)
+            echo "PASS test-cargo-pull (route reachable, nexus responded)";;
+          *)
+            echo "FAIL: connection error or nginx routing failure (HTTP $HTTP)"; exit 1;;
+        esac

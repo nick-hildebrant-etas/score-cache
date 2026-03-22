@@ -3,7 +3,7 @@ version: '3'
 
 vars:
   result_folder: '{{.result_folder | default "./build/"}}'
-  common_tasks: '{{.common_tasks | default "./images/tasks/"}}'
+  common_tasks:  '{{.common_tasks  | default "./images/tasks/"}}'
 
 includes:
   score-cache:
