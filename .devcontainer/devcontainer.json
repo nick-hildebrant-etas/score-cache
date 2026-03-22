@@ -1,0 +1,25 @@
+{
+  "name": "score-cache",
+  "image": "mcr.microsoft.com/devcontainers/base:noble",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "dockerDashComposeVersion": "v2"
+    }
+  },
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "remoteEnv": {
+    "DOCKER_BUILDKIT": "1"
+  },
+  "postCreateCommand": "bash .devcontainer/install-tools.sh && echo 'score-cache devcontainer ready — run: task --list'",
+  "overrideCommand": false,
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "task.vscode-task"
+      ]
+    }
+  }
+}

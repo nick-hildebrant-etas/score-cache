@@ -1,0 +1,86 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+vars:
+  result_folder: '{{.result_folder | default "../../build/"}}'
+  common_tasks: '{{.common_tasks | default "../../images/tasks/"}}'
+  registry: '{{.registry | default "ghcr.io"}}'
+  image_owner: '{{.image_owner | default "nick-hildebrant-etas"}}'
+  image_name: '{{.image_name | default "score-cache/nginx"}}'
+  image_tag: '{{.image_tag | default "latest"}}'
+  compose_file: '{{.compose_file | default "docker-compose.yml"}}'
+  dockerfile: '{{.dockerfile | default "Dockerfile"}}'
+  tests_dir: '{{.tests_dir | default "../../tests/"}}'
+
+includes:
+  common:
+    taskfile: '{{.common_tasks}}common.yml'
+    optional: true
+  vm:
+    taskfile: '{{.common_tasks}}vm.yml'
+    optional: true
+
+tasks:
+  default:
+    desc: Build the score-cache OCI container
+    cmds:
+      - task: build
+    silent: true
+
+  build:
+    desc: Build the score-cache nginx proxy image
+    cmds:
+      - mkdir -p {{.result_folder}}
+      - >-
+        docker build
+        --label org.opencontainers.image.source=https://github.com/{{.image_owner}}/score-cache
+        --label org.opencontainers.image.version={{.image_tag}}
+        -t {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}}
+        -f {{.dockerfile}}
+        .
+
+  push:
+    desc: Push the score-cache image to the registry
+    cmds:
+      - docker push {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}}
+
+  login:
+    desc: Log in to the container registry
+    cmds:
+      - echo "${REGISTRY_TOKEN}" | docker login {{.registry}} -u "${REGISTRY_USER}" --password-stdin
+
+  up:
+    desc: Start the score-cache stack (nginx + nexus + bazel-remote)
+    cmds:
+      - docker compose -f {{.compose_file}} up -d
+
+  down:
+    desc: Stop the score-cache stack
+    cmds:
+      - docker compose -f {{.compose_file}} down
+
+  configure-nexus:
+    desc: Provision Nexus proxy repositories after first start
+    cmds:
+      - bash nexus/configure.sh
+
+  test:
+    desc: Run score-cache service tests
+    cmds:
+      - bash {{.tests_dir}}test_services.sh
+
+  logs:
+    desc: Follow score-cache service logs
+    cmds:
+      - docker compose -f {{.compose_file}} logs --follow
+
+  clean:
+    desc: Remove score-cache images and volumes
+    cmds:
+      - docker compose -f {{.compose_file}} down --volumes --rmi local
+      - rm -rf {{.result_folder}}
+
+  download-cloud-image:
+    desc: Download Ubuntu Noble 24.04 LTS aarch64 cloud image
+    cmds:
+      - task: vm:download-cloud-image

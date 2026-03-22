@@ -1,0 +1,73 @@
+services:
+
+  # ─── nginx reverse proxy ─────────────────────────────────────────────────────
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_OWNER:-nick-hildebrant-etas}/score-cache/nginx:${IMAGE_TAG:-latest}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${GRPC_PORT:-9093}:9093"
+    depends_on:
+      nexus:
+        condition: service_healthy
+      bazel-remote:
+        condition: service_healthy
+    networks:
+      - score-cache-net
+    restart: unless-stopped
+
+  # ─── Sonatype Nexus OSS (cargo / PyPI / OCI / raw-rules proxy repos) ─────────
+  nexus:
+    image: sonatype/nexus3:3.76.0
+    environment:
+      INSTALL4J_ADD_VM_PARAMS: >-
+        -Xms512m -Xmx2048m
+        -XX:MaxDirectMemorySize=2703m
+        -Djava.util.prefs.userRoot=/nexus-data/javaprefs
+    volumes:
+      - nexus-data:/nexus-data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/service/rest/v1/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    expose:
+      - "8081"
+    networks:
+      - score-cache-net
+    restart: unless-stopped
+
+  # ─── bazel-remote (REAPI — HTTP + gRPC) ─────────────────────────────────────
+  bazel-remote:
+    image: buchgr/bazel-remote-cache:latest
+    command:
+      - "--dir=/data"
+      - "--max_size=${BAZEL_REMOTE_MAX_SIZE_GB:-10}"
+      - "--host=0.0.0.0"
+      - "--port=8080"
+      - "--grpc_port=9092"
+    volumes:
+      - bazel-remote-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    expose:
+      - "8080"
+      - "9092"
+    networks:
+      - score-cache-net
+    restart: unless-stopped
+
+volumes:
+  nexus-data:
+  bazel-remote-data:
+
+networks:
+  score-cache-net:
+    driver: bridge

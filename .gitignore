@@ -1,0 +1,16 @@
+# Build artifacts
+build/
+
+# Task cache
+.task/
+
+# Docker env overrides
+.env.local
+.env.*.local
+
+# Editor artifacts
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
