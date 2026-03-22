@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+# Shared VM / cloud-image tasks.
+# Include this file from an image Taskfile using the common_tasks var:
+#
+#   includes:
+#     vm:
+#       taskfile: '{{.common_tasks}}vm.yml'
+#       optional: true
+
+vars:
+  ubuntu_image: '{{.ubuntu_image | default "ubuntu-24.04-server-cloudimg-arm64.img"}}'
+  ubuntu_base_url: '{{.ubuntu_base_url | default "https://cloud-images.ubuntu.com/noble/current/"}}'
+  result_folder: '{{.result_folder | default "../../build/"}}'
+
+tasks:
+  download-cloud-image:
+    desc: Download the Ubuntu Noble 24.04 LTS aarch64 cloud image (boots directly, no build step)
+    cmds:
+      - mkdir -p {{.result_folder}}
+      - |
+        dest="{{.result_folder}}{{.ubuntu_image}}"
+        if [ ! -f "${dest}" ]; then
+          echo "Downloading {{.ubuntu_image}} …"
+          curl -fSL "{{.ubuntu_base_url}}{{.ubuntu_image}}" -o "${dest}"
+          echo "Download complete: ${dest}"
+        else
+          echo "Image already present: ${dest}"
+        fi
+    generates:
+      - '{{.result_folder}}{{.ubuntu_image}}'

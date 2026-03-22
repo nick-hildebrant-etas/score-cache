@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+# Shared Docker tasks.
+# Include from an image Taskfile via the common_tasks var:
+#
+#   includes:
+#     common:
+#       taskfile: '{{.common_tasks}}common.yml'
+#       optional: true
+
+vars:
+  registry:    '{{.registry    | default "ghcr.io"}}'
+  image_owner: '{{.image_owner | default "nick-hildebrant-etas"}}'
+  image_name:  '{{.image_name  | default "score-cache"}}'
+  image_tag:   '{{.image_tag   | default "latest"}}'
+  result_folder: '{{.result_folder | default "../../build/"}}'
+
+tasks:
+  build:
+    desc: Build the OCI container image
+    cmds:
+      - mkdir -p {{.result_folder}}
+      - >-
+        docker build
+        --label org.opencontainers.image.source=https://github.com/{{.image_owner}}/score-cache
+        --label org.opencontainers.image.version={{.image_tag}}
+        -t {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}}
+        .
+
+  push:
+    desc: Push the OCI container image to the registry
+    cmds:
+      - docker push {{.registry}}/{{.image_owner}}/{{.image_name}}:{{.image_tag}}
+
+  login:
+    desc: Log in to the container registry
+    cmds:
+      - echo "${REGISTRY_TOKEN}" | docker login {{.registry}} -u "${REGISTRY_USER}" --password-stdin

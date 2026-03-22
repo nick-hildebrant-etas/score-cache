@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+vars:
+  result_folder: '{{.result_folder | default "./build/"}}'
+  common_tasks:  '{{.common_tasks  | default "./images/tasks/"}}'
+
+includes:
+  score-cache:
+    taskfile: './images/score-cache/Taskfile.yml'
+    dir: './images/score-cache/'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+    silent: true
